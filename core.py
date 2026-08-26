@@ -109,93 +109,15 @@ def synthesize_demo(n=250, seed=11):
     return d
 
 
-def _shareholding_from_soup(soup: BeautifulSoup):
-    """Extract the latest institutional sponsorship from Screener's public shareholding table.
+def _sector_from_company_page(company_url: str, attempts: int = 3):
+    """Read Screener's public peer-comparison breadcrumb.
 
-    `institutional_holding` = latest FII + DII percentage.
-    `institutional_change` = change in that combined percentage versus the previous
-    reported quarter.  We keep FII/DII components as raw evidence as well.
-
-    The parser deliberately accepts a few label variants because Screener's XBRL
-    classifications can differ by company. Missing values remain NaN rather than
-    being invented.
+    Screener company pages expose a classification path in the Peer comparison
+    section, e.g. Healthcare → Pharmaceuticals & Biotechnology → Pharmaceuticals.
+    We use the broadest public bucket as `sector` and the narrowest as `industry`.
     """
-    section = soup.find("section", id=re.compile(r"shareholding", re.I))
-    if section is None:
-        heading = soup.find(["h2", "h3"], string=re.compile(r"Shareholding\s+Pattern", re.I))
-        section = heading.find_parent("section") if heading else None
-    if section is None:
-        return {
-            "fii_holding": np.nan, "dii_holding": np.nan,
-            "fii_change": np.nan, "dii_change": np.nan,
-            "institutional_holding": np.nan, "institutional_change": np.nan,
-        }
-
-    def norm(txt):
-        return re.sub(r"[^a-z]", "", str(txt).lower())
-
-    def row_values(table, aliases):
-        aliases = [norm(a) for a in aliases]
-        for tr in table.find_all("tr"):
-            cells = tr.find_all(["th", "td"])
-            if len(cells) < 2:
-                continue
-            label = norm(cells[0].get_text(" ", strip=True))
-            if any(label.startswith(a) for a in aliases):
-                vals = [_num(c.get_text(" ", strip=True)) for c in cells[1:]]
-                return [v for v in vals if pd.notna(v)]
-        return []
-
-    # Screener generally renders the quarterly table first. Select the first table
-    # that actually contains an FII/DII-type row rather than relying on position.
-    fii_aliases = ["FII", "FIIs", "Foreign Institutions", "Foreign Portfolio Investors"]
-    dii_aliases = ["DII", "DIIs", "Domestic Institutions", "Domestic Institutional Investors"]
-    chosen = None
-    for table in section.find_all("table"):
-        text = norm(table.get_text(" ", strip=True))
-        if any(norm(a) in text for a in fii_aliases + dii_aliases):
-            chosen = table
-            break
-    if chosen is None:
-        return {
-            "fii_holding": np.nan, "dii_holding": np.nan,
-            "fii_change": np.nan, "dii_change": np.nan,
-            "institutional_holding": np.nan, "institutional_change": np.nan,
-        }
-
-    fii_vals = row_values(chosen, fii_aliases)
-    dii_vals = row_values(chosen, dii_aliases)
-
-    fii_latest = fii_vals[-1] if fii_vals else np.nan
-    dii_latest = dii_vals[-1] if dii_vals else np.nan
-    fii_prev = fii_vals[-2] if len(fii_vals) >= 2 else np.nan
-    dii_prev = dii_vals[-2] if len(dii_vals) >= 2 else np.nan
-
-    latest_parts = [v for v in (fii_latest, dii_latest) if pd.notna(v)]
-    prev_parts = [v for v in (fii_prev, dii_prev) if pd.notna(v)]
-    inst_latest = sum(latest_parts) if latest_parts else np.nan
-    inst_prev = sum(prev_parts) if prev_parts else np.nan
-
-    return {
-        "fii_holding": fii_latest,
-        "dii_holding": dii_latest,
-        "fii_change": (fii_latest - fii_prev) if pd.notna(fii_latest) and pd.notna(fii_prev) else np.nan,
-        "dii_change": (dii_latest - dii_prev) if pd.notna(dii_latest) and pd.notna(dii_prev) else np.nan,
-        "institutional_holding": inst_latest,
-        "institutional_change": (inst_latest - inst_prev) if pd.notna(inst_latest) and pd.notna(inst_prev) else np.nan,
-    }
-
-
-def _metadata_from_company_page(company_url: str, attempts: int = 3):
-    """Read sector/industry and institutional sponsorship from one Screener page."""
-    empty = {
-        "sector": "Unclassified", "industry": "Unclassified",
-        "fii_holding": np.nan, "dii_holding": np.nan,
-        "fii_change": np.nan, "dii_change": np.nan,
-        "institutional_holding": np.nan, "institutional_change": np.nan,
-    }
     if not isinstance(company_url, str) or not company_url.startswith("http"):
-        return empty
+        return "Unclassified", "Unclassified"
 
     for attempt in range(attempts):
         try:
@@ -205,42 +127,43 @@ def _metadata_from_company_page(company_url: str, attempts: int = 3):
                 continue
             r.raise_for_status()
             soup = BeautifulSoup(r.text, "lxml")
-
-            sector, industry = "Unclassified", "Unclassified"
             peers = soup.find("section", id="peers")
-            if peers:
-                crumbs = []
-                for a in peers.find_all("a", href=True):
-                    href = a.get("href", "")
-                    label = re.sub(r"\s+", " ", a.get_text(" ", strip=True)).strip()
-                    if href.startswith("/market/") and label:
-                        if not crumbs or crumbs[-1][0] != label:
-                            crumbs.append((label, href))
-                if crumbs:
-                    crumbs = sorted(crumbs, key=lambda x: len([p for p in x[1].split("/") if p]))
-                    sector = crumbs[0][0]
-                    industry = crumbs[-1][0]
+            if not peers:
+                return "Unclassified", "Unclassified"
 
-            result = {"sector": sector, "industry": industry}
-            result.update(_shareholding_from_soup(soup))
-            return result
+            crumbs = []
+            for a in peers.find_all("a", href=True):
+                href = a.get("href", "")
+                label = re.sub(r"\\s+", " ", a.get_text(" ", strip=True)).strip()
+                if href.startswith("/market/") and label:
+                    # Ignore peer-table controls and de-duplicate consecutive labels.
+                    if not crumbs or crumbs[-1][0] != label:
+                        crumbs.append((label, href))
+
+            if not crumbs:
+                return "Unclassified", "Unclassified"
+
+            # The broad sector has the shallowest /market/... path. The most
+            # specific industry has the deepest path.
+            crumbs = sorted(crumbs, key=lambda x: len([p for p in x[1].split("/") if p]))
+            sector = crumbs[0][0]
+            industry = crumbs[-1][0]
+            return sector, industry
         except Exception:
             if attempt < attempts - 1:
                 time.sleep(0.6 * (attempt + 1))
-    return empty
+    return "Unclassified", "Unclassified"
 
 
-def _enrich_public_metadata(d: pd.DataFrame, max_workers: int = 6) -> pd.DataFrame:
-    """Add public Screener sector/industry and FII+DII sponsorship evidence."""
+def _enrich_public_sectors(d: pd.DataFrame, max_workers: int = 6) -> pd.DataFrame:
+    """Add sector/industry classifications to a public Screener universe.
+
+    The work is concurrent but deliberately bounded to be gentle on the public
+    website. Failed lookups remain Unclassified rather than inventing a sector.
+    """
     x = d.copy()
-    defaults = {
-        "sector": "Unclassified", "industry": "Unclassified",
-        "fii_holding": np.nan, "dii_holding": np.nan,
-        "fii_change": np.nan, "dii_change": np.nan,
-        "institutional_holding": np.nan, "institutional_change": np.nan,
-    }
-    for col, val in defaults.items():
-        x[col] = val
+    x["sector"] = "Unclassified"
+    x["industry"] = "Unclassified"
 
     jobs = [(idx, url) for idx, url in zip(x.index, x.get("company_url", pd.Series(index=x.index, dtype=str)))
             if isinstance(url, str) and url.startswith("http")]
@@ -248,16 +171,17 @@ def _enrich_public_metadata(d: pd.DataFrame, max_workers: int = 6) -> pd.DataFra
         return x
 
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
-        futures = {ex.submit(_metadata_from_company_page, url): idx for idx, url in jobs}
+        futures = {ex.submit(_sector_from_company_page, url): idx for idx, url in jobs}
         for fut in as_completed(futures):
             idx = futures[fut]
             try:
-                rec = fut.result()
+                sector, industry = fut.result()
             except Exception:
-                rec = defaults
-            for col, val in rec.items():
-                x.at[idx, col] = val
+                sector, industry = "Unclassified", "Unclassified"
+            x.at[idx, "sector"] = sector or "Unclassified"
+            x.at[idx, "industry"] = industry or sector or "Unclassified"
     return x
+
 
 def fetch_screener_top250(limit=250):
     """Best-effort reader of a public Screener screen plus public sector breadcrumbs.
@@ -312,12 +236,14 @@ def fetch_screener_top250(limit=250):
     # Correct the previous behaviour that hard-coded every public stock as
     # 'Unclassified'. Classification now comes from Screener's own public
     # Peer-comparison taxonomy on each company page.
-    d=_enrich_public_metadata(d, max_workers=6)
+    d=_enrich_public_sectors(d, max_workers=6)
 
     d["eps_yoy"]=d["qtr_profit_yoy"]
     d["roe"]=np.nan
     d["eps_cagr_3y"]=np.nan
     d["sales_cagr_3y"]=np.nan
+    d["institutional_holding"]=np.nan
+    d["institutional_change"]=np.nan
     d["eps_acceleration"]=np.nan
     d["opm_change"]=np.nan
     d["cfo_positive"]=np.nan
