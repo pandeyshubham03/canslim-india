@@ -207,7 +207,20 @@ with pages[2]:
     if ss: board=board[board["sector"].isin(ss)]
     if vv: board=board[board["verdict"].isin(vv)]
     cols=["rank","company","symbol","sector","market_cap_cr","selected_score","C","A","N","S","L","I","sector_strength","actionability","factor_coverage","setup","verdict"]
-    st.dataframe(board[cols],hide_index=True,use_container_width=True,height=650,column_config={"selected_score":st.column_config.ProgressColumn("Final score",0,100,format="%.1f"),"factor_coverage":st.column_config.ProgressColumn("Coverage",0,100,format="%.0f%%")})
+    st.dataframe(
+        board[cols],
+        hide_index=True,
+        use_container_width=True,
+        height=650,
+        column_config={
+            "selected_score": st.column_config.ProgressColumn(
+                "Final score", min_value=0, max_value=100, format="%.1f"
+            ),
+            "factor_coverage": st.column_config.ProgressColumn(
+                "Coverage", min_value=0, max_value=100, format="%.0f%%"
+            ),
+        },
+    )
     st.download_button("Download current ranking",board.to_csv(index=False).encode(),"canslim_india_ranking.csv","text/csv")
 
 with pages[3]:
