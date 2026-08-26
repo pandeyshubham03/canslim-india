@@ -49,7 +49,7 @@ hr{border:none;border-top:1px solid #e5e5ea;margin:1.6rem 0}
 """, unsafe_allow_html=True)
 
 @st.cache_data(ttl=1800, show_spinner=False)
-def cached_public_universe():
+def cached_public_universe_v2():
     return fetch_screener_top250(250)
 
 @st.cache_data(ttl=1800, show_spinner=False)
@@ -97,10 +97,15 @@ with st.expander("Data & refresh controls", expanded=st.session_state.source=="D
                     st.session_state.raw=synthesize_demo(); st.session_state.source="Demo data"; st.session_state.mscore=62; st.session_state.mlabel="Demo — uptrend/neutral proxy"; st.session_state.nifty=np.nan
                 elif mode.startswith("Public"):
                     with st.spinner("Reading the top-250 Screener universe..."):
-                        d=cached_public_universe()
+                        d=cached_public_universe_v2()
                     if live_prices:
                         with st.spinner("Refreshing market history..."):
                             d=cached_live_market(d.to_json(orient="split"))
+                    classified = int(((d.get("sector", pd.Series("Unclassified", index=d.index)) != "Unclassified") & d.get("sector", pd.Series("", index=d.index)).notna()).sum())
+                    if classified < max(1, int(len(d)*0.80)):
+                        st.warning(f"Sector classification completed for {classified}/{len(d)} companies. Some Screener company pages may have rate-limited the refresh; clicking Refresh again later can fill remaining sectors.")
+                    else:
+                        st.success(f"Sector classification loaded for {classified}/{len(d)} companies.")
                     ms,ml,ni=cached_regime(); st.session_state.raw=d; st.session_state.source="Public Screener + live market"; st.session_state.mscore=ms; st.session_state.mlabel=ml; st.session_state.nifty=ni
                 else:
                     if uploaded is None: st.error("Upload a Screener export first.")
