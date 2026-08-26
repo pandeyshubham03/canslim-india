@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from typing import Dict, Optional
 
@@ -108,8 +109,87 @@ def synthesize_demo(n=250, seed=11):
     return d
 
 
+def _sector_from_company_page(company_url: str, attempts: int = 3):
+    """Read Screener's public peer-comparison breadcrumb.
+
+    Screener company pages expose a classification path in the Peer comparison
+    section, e.g. Healthcare → Pharmaceuticals & Biotechnology → Pharmaceuticals.
+    We use the broadest public bucket as `sector` and the narrowest as `industry`.
+    """
+    if not isinstance(company_url, str) or not company_url.startswith("http"):
+        return "Unclassified", "Unclassified"
+
+    for attempt in range(attempts):
+        try:
+            r = requests.get(company_url, headers=UA, timeout=20)
+            if r.status_code == 429:
+                time.sleep(1.5 * (attempt + 1))
+                continue
+            r.raise_for_status()
+            soup = BeautifulSoup(r.text, "lxml")
+            peers = soup.find("section", id="peers")
+            if not peers:
+                return "Unclassified", "Unclassified"
+
+            crumbs = []
+            for a in peers.find_all("a", href=True):
+                href = a.get("href", "")
+                label = re.sub(r"\\s+", " ", a.get_text(" ", strip=True)).strip()
+                if href.startswith("/market/") and label:
+                    # Ignore peer-table controls and de-duplicate consecutive labels.
+                    if not crumbs or crumbs[-1][0] != label:
+                        crumbs.append((label, href))
+
+            if not crumbs:
+                return "Unclassified", "Unclassified"
+
+            # The broad sector has the shallowest /market/... path. The most
+            # specific industry has the deepest path.
+            crumbs = sorted(crumbs, key=lambda x: len([p for p in x[1].split("/") if p]))
+            sector = crumbs[0][0]
+            industry = crumbs[-1][0]
+            return sector, industry
+        except Exception:
+            if attempt < attempts - 1:
+                time.sleep(0.6 * (attempt + 1))
+    return "Unclassified", "Unclassified"
+
+
+def _enrich_public_sectors(d: pd.DataFrame, max_workers: int = 6) -> pd.DataFrame:
+    """Add sector/industry classifications to a public Screener universe.
+
+    The work is concurrent but deliberately bounded to be gentle on the public
+    website. Failed lookups remain Unclassified rather than inventing a sector.
+    """
+    x = d.copy()
+    x["sector"] = "Unclassified"
+    x["industry"] = "Unclassified"
+
+    jobs = [(idx, url) for idx, url in zip(x.index, x.get("company_url", pd.Series(index=x.index, dtype=str)))
+            if isinstance(url, str) and url.startswith("http")]
+    if not jobs:
+        return x
+
+    with ThreadPoolExecutor(max_workers=max_workers) as ex:
+        futures = {ex.submit(_sector_from_company_page, url): idx for idx, url in jobs}
+        for fut in as_completed(futures):
+            idx = futures[fut]
+            try:
+                sector, industry = fut.result()
+            except Exception:
+                sector, industry = "Unclassified", "Unclassified"
+            x.at[idx, "sector"] = sector or "Unclassified"
+            x.at[idx, "industry"] = industry or sector or "Unclassified"
+    return x
+
+
 def fetch_screener_top250(limit=250):
-    """Best-effort reader of a public Screener screen. No Screener API is assumed."""
+    """Best-effort reader of a public Screener screen plus public sector breadcrumbs.
+
+    Screener has no public API. The screen provides the universe and visible
+    fundamentals; each company page's Peer comparison breadcrumb supplies the
+    public sector / industry classification.
+    """
     rows=[]
     for page in range(1,15):
         url=SCREENER_URL.format(page=page)
@@ -152,7 +232,12 @@ def fetch_screener_top250(limit=250):
         raise RuntimeError("Could not read the public Screener screen.")
     d=d.sort_values("market_cap_cr",ascending=False).drop_duplicates("company").head(limit).reset_index(drop=True)
     d["market_cap_rank"]=np.arange(1,len(d)+1)
-    d["sector"]="Unclassified"
+
+    # Correct the previous behaviour that hard-coded every public stock as
+    # 'Unclassified'. Classification now comes from Screener's own public
+    # Peer-comparison taxonomy on each company page.
+    d=_enrich_public_sectors(d, max_workers=6)
+
     d["eps_yoy"]=d["qtr_profit_yoy"]
     d["roe"]=np.nan
     d["eps_cagr_3y"]=np.nan
