@@ -49,7 +49,7 @@ hr{border:none;border-top:1px solid #e5e5ea;margin:1.6rem 0}
 """, unsafe_allow_html=True)
 
 @st.cache_data(ttl=1800, show_spinner=False)
-def cached_public_universe_v2():
+def cached_public_universe_v3():
     return fetch_screener_top250(250)
 
 @st.cache_data(ttl=1800, show_spinner=False)
@@ -97,15 +97,16 @@ with st.expander("Data & refresh controls", expanded=st.session_state.source=="D
                     st.session_state.raw=synthesize_demo(); st.session_state.source="Demo data"; st.session_state.mscore=62; st.session_state.mlabel="Demo — uptrend/neutral proxy"; st.session_state.nifty=np.nan
                 elif mode.startswith("Public"):
                     with st.spinner("Reading the top-250 Screener universe..."):
-                        d=cached_public_universe_v2()
+                        d=cached_public_universe_v3()
                     if live_prices:
                         with st.spinner("Refreshing market history..."):
                             d=cached_live_market(d.to_json(orient="split"))
                     classified = int(((d.get("sector", pd.Series("Unclassified", index=d.index)) != "Unclassified") & d.get("sector", pd.Series("", index=d.index)).notna()).sum())
-                    if classified < max(1, int(len(d)*0.80)):
-                        st.warning(f"Sector classification completed for {classified}/{len(d)} companies. Some Screener company pages may have rate-limited the refresh; clicking Refresh again later can fill remaining sectors.")
+                    inst_loaded = int(pd.to_numeric(d.get("institutional_holding", pd.Series(np.nan, index=d.index)), errors="coerce").notna().sum())
+                    if classified < max(1, int(len(d)*0.80)) or inst_loaded < max(1, int(len(d)*0.80)):
+                        st.warning(f"Public metadata loaded: sectors {classified}/{len(d)} • institutional sponsorship {inst_loaded}/{len(d)}. Screener may rate-limit some company pages; refresh later to fill remaining gaps.")
                     else:
-                        st.success(f"Sector classification loaded for {classified}/{len(d)} companies.")
+                        st.success(f"Public metadata loaded: sectors {classified}/{len(d)} • institutional sponsorship {inst_loaded}/{len(d)}.")
                     ms,ml,ni=cached_regime(); st.session_state.raw=d; st.session_state.source="Public Screener + live market"; st.session_state.mscore=ms; st.session_state.mlabel=ml; st.session_state.nifty=ni
                 else:
                     if uploaded is None: st.error("Upload a Screener export first.")
@@ -251,7 +252,7 @@ with pages[3]:
             if key in st.session_state.watch: st.session_state.watch.remove(key)
             else: st.session_state.watch.add(key)
             st.rerun()
-    evidence=pd.DataFrame({"Metric":["Quarter profit/EPS YoY","Quarter sales YoY","3Y EPS growth","3Y sales growth","ROE","ROCE","Institutional holding","12M return","6M return","Distance from 52W high","Volume / 50D avg"],"Value":[r.get("eps_yoy"),r.get("sales_yoy"),r.get("eps_cagr_3y"),r.get("sales_cagr_3y"),r.get("roe"),r.get("roce"),r.get("institutional_holding"),r.get("return_12m"),r.get("return_6m"),r.get("distance_52w_high_pct"),r.get("volume_ratio")]})
+    evidence=pd.DataFrame({"Metric":["Quarter profit/EPS YoY","Quarter sales YoY","3Y EPS growth","3Y sales growth","ROE","ROCE","FII holding","DII holding","Institutional holding (FII+DII)","Institutional change QoQ","12M return","6M return","Distance from 52W high","Volume / 50D avg"],"Value":[r.get("eps_yoy"),r.get("sales_yoy"),r.get("eps_cagr_3y"),r.get("sales_cagr_3y"),r.get("roe"),r.get("roce"),r.get("fii_holding"),r.get("dii_holding"),r.get("institutional_holding"),r.get("institutional_change"),r.get("return_12m"),r.get("return_6m"),r.get("distance_52w_high_pct"),r.get("volume_ratio")]})
     st.dataframe(evidence,hide_index=True,use_container_width=True)
 
 with pages[4]:
