@@ -11,7 +11,7 @@ import pandas as pd
 import requests
 from bs4 import BeautifulSoup
 
-SCREENER_URL = "https://www.screener.in/screens/1341767/top-250-companies-by-market-cap/?order=desc&page={page}"
+SCREENER_URL = "https://www.screener.in/screens/1255717/top-250/?order=desc&page={page}"
 UA = {"User-Agent": "Mozilla/5.0 (CANSLIM-India-Academic-Dashboard/1.0)"}
 
 LITERATURE_WEIGHTS = {"C": .22, "A": .18, "N": .10, "S": .15, "L": .25, "I": .10}
